@@ -1,3 +1,14 @@
+__pycache__
+.continue
+.idea
+data
+interest
+ontology
+chunks.json
+metadata.json
+plants.index
+species_list.json
+rag_index
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]
