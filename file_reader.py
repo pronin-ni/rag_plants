@@ -8,6 +8,7 @@ OCR через EasyOCR (лучшее качество для русского я
 
 import os
 import re
+import shutil
 from typing import Optional, List
 from bs4 import BeautifulSoup
 import ebooklib
@@ -280,190 +281,215 @@ def read_pdf(file_path: str, use_ocr: bool = True, ocr_lang: List[str] = ["ru", 
         print(f"⚠️ Ошибка чтения PDF {file_path}: {type(e).__name__}: {e}")
         return ""
 
-
 # ==========================
-# ЧТЕНИЕ DJVU (с EasyOCR)
+# ЧТЕНИЕ DJVU (постраничный OCR — надёжно работает даже с повреждёнными файлами)
 # ==========================
 
-def read_djvu(file_path: str, use_ocr: bool = True, ocr_lang: List[str] = ["ru", "en"],
-              gpu: bool = False, dpi_scale: float = 3.0,
-              min_text_ratio: float = 0.15,
-              ocr_page_limit: int = 50) -> str:
-    """
-    Чтение DJVU файла через DjVuLibre CLI (Windows-совместимо)
-
-    Стратегия:
-    1. djvutxt — извлечение текстового слоя (если есть)
-    2. djvupdf + read_pdf() + OCR — если текстового слоя нет
-
-    Args:
-        file_path: Путь к DJVU файлу
-        use_ocr: Использовать OCR если текстовый слой отсутствует
-        ocr_lang: Языки для OCR
-        gpu: Использовать GPU для OCR
-        dpi_scale: Масштаб рендера для OCR
-        min_text_ratio: Мин. доля текста для пропуска OCR (передаётся в read_pdf)
-        ocr_page_limit: Лимит страниц для OCR (передаётся в read_pdf)
-
-    Returns:
-        Текст документа
-    """
-    import subprocess
+def find_djvulibre_exe(exe_name: str) -> Optional[str]:
+    """Поиск исполняемого файла DjVuLibre в PATH и типичных местах установки"""
     import shutil
-    import tempfile
     import os
 
-    print(f"   📖 Чтение DJVU через DjVuLibre CLI...")
+    path = shutil.which(exe_name)
+    if path:
+        return path
 
-    # ==========================================
-    # ПОИСК djvutxt и djvupdf в системе
-    # ==========================================
+    potential_paths = [
+        r"C:\Program Files\DjVuLibre",
+        r"C:\Program Files (x86)\DjVuLibre",
+        r"C:\DjVuLibre",
+    ]
+    for base in potential_paths:
+        candidate = os.path.join(base, exe_name if exe_name.endswith(".exe") else exe_name + ".exe")
+        if os.path.exists(candidate):
+            return candidate
+    return None
 
-    djvutxt_path = shutil.which("djvutxt")
-    djvupdf_path = shutil.which("djvupdf")
 
-    # Если не найдено через which — пробуем стандартные пути Windows
-    if not djvutxt_path or not djvupdf_path:
-        potential_paths = [
-            r"C:\Program Files\DjVuLibre",
-            r"C:\Program Files (x86)\DjVuLibre",
-            r"C:\DjVuLibre",
+def get_djvu_page_count(file_path: str) -> Optional[int]:
+    """Получает количество страниц в DJVU через djvused"""
+    djvused = find_djvulibre_exe("djvused")
+    if not djvused:
+        return None
+
+    import subprocess
+    try:
+        res = subprocess.run(
+            [djvused, file_path, "-e", "n"],
+            capture_output=True,
+            text=True,
+            timeout=15,
+            creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
+        )
+        if res.returncode == 0:
+            return int(res.stdout.strip())
+    except Exception:
+        pass
+    return None
+
+
+def extract_djvu_page_image(file_path: str, page_num: int, dpi: int = 240, format: str = "png") -> Optional[str]:
+    """Извлекает одну страницу DJVU как изображение через ddjvu"""
+    import tempfile
+    import subprocess
+    import os
+
+    ddjvu = find_djvulibre_exe("ddjvu")
+    if not ddjvu:
+        print("⚠️ ddjvu.exe не найден")
+        return None
+
+    with tempfile.NamedTemporaryFile(suffix=f".{format}", delete=False) as tmp:
+        temp_img = tmp.name
+
+    try:
+        cmd = [
+            ddjvu,
+            "-page", str(page_num + 1),
+            "-format", format,
+            f"-dpi={dpi}",
+            file_path,
+            temp_img
         ]
-        for base_path in potential_paths:
-            if not djvutxt_path:
-                candidate = os.path.join(base_path, "djvutxt.exe")
-                if os.path.exists(candidate):
-                    djvutxt_path = candidate
-            if not djvupdf_path:
-                candidate = os.path.join(base_path, "djvupdf.exe")
-                if os.path.exists(candidate):
-                    djvupdf_path = candidate
+        subprocess.run(
+            cmd,
+            check=True,
+            timeout=90,                     # увеличил до 90 сек на случай тяжёлых страниц
+            capture_output=True,
+            creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
+        )
 
-    # ==========================================
-    # ПОПЫТКА 1: djvutxt — извлечение текстового слоя
-    # ==========================================
+        if os.path.exists(temp_img) and os.path.getsize(temp_img) > 4096:
+            return temp_img
 
-    if djvutxt_path:
+        if os.path.exists(temp_img):
+            os.unlink(temp_img)
+        return None
+
+    except Exception as e:
+        print(f"  Ошибка рендера страницы {page_num+1}: {type(e).__name__}")
+        if os.path.exists(temp_img):
+            os.unlink(temp_img)
+        return None
+
+
+def read_djvu(
+    file_path: str,
+    use_ocr: bool = True,
+    ocr_lang: List[str] = ["ru", "en"],
+    gpu: bool = False,
+    dpi_scale: float = 3.0,           # пока не используется, но оставлен для совместимости
+    min_text_ratio: float = 0.15,
+    ocr_page_limit: int = 120
+) -> str:
+    """
+    Чтение DJVU:
+      1. djvutxt — если есть встроенный текст (самый точный и быстрый)
+      2. Постраничный рендер через ddjvu → EasyOCR (работает с битыми файлами)
+    """
+    import os
+    import re
+    import subprocess
+    import numpy as np
+    from PIL import Image
+
+    filename = os.path.basename(file_path)
+    print(f" 📖 DJVU: {filename}")
+
+    # ──────────────────────────────────────────
+    # Шаг 1: djvutxt — встроенный текст
+    # ──────────────────────────────────────────
+    djvutxt = find_djvulibre_exe("djvutxt")
+    if djvutxt:
         try:
-            print(f"   🔍 Попытка извлечь текст через djvutxt...")
-
-            result = subprocess.run(
-                [djvutxt_path, file_path],
+            print("   → Пробуем djvutxt...")
+            res = subprocess.run(
+                [djvutxt, file_path],
                 capture_output=True,
                 text=True,
-                timeout=120,  # 2 минуты на файл
+                timeout=120,
                 encoding="utf-8",
                 errors="ignore",
-                creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0  # Без окна на Windows
-            )
-
-            if result.returncode == 0:
-                text = result.stdout
-
-                # Очистка от служебных символов djvutxt
-                text = re.sub(r'\[\d+\]', '', text)  # Убираем [1], [2] — номера страниц
-                text = re.sub(r'<<\d+>>', '', text)  # Убираем <<123>> — координаты
-                text = re.sub(r'\n{3,}', '\n\n', text)
-                text = text.strip()
-
-                # Проверка: достаточно ли текста?
-                useful_chars = len(re.findall(r'[А-Яа-яЁёA-Za-z0-9\s\.\,\!\?\;\:\-\(\)]', text))
-                total_chars = len(text) if text else 0
-                words = [w for w in text.split() if len(w) >= 3]
-
-                if total_chars > 500 and useful_chars / max(total_chars, 1) >= 0.1 and len(words) >= 30:
-                    print(f"   ✅ Текстовый слой извлечён: {len(text)} символов")
-                    return text
-
-            else:
-                print(f"   ⚠️ djvutxt вернул код {result.returncode}")
-                if result.stderr:
-                    print(f"      stderr: {result.stderr[:200]}")
-
-        except subprocess.TimeoutExpired:
-            print(f"   ⚠️ djvutxt таймаут (>120 сек)")
-        except FileNotFoundError:
-            print(f"   ⚠️ djvutxt не найден")
-        except Exception as e:
-            print(f"   ⚠️ Ошибка djvutxt: {type(e).__name__}: {e}")
-
-    else:
-        print(f"   ⚠️ djvutxt не найден в PATH или стандартных путях")
-
-    # ==========================================
-    # ПОПЫТКА 2: djvupdf + read_pdf() + OCR
-    # ==========================================
-
-    if djvupdf_path and use_ocr:
-        try:
-            print(f"   🔄 Текстовый слой не найден → конвертирую в PDF + OCR...")
-
-            # Создаём временный PDF
-            with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp:
-                temp_pdf = tmp.name
-
-            # Конвертация DJVU → PDF
-            subprocess.run(
-                [djvupdf_path, file_path, "-o", temp_pdf],
-                check=True,
-                capture_output=True,
-                timeout=300,  # 5 минут на конвертацию
                 creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
             )
-
-            if os.path.exists(temp_pdf):
-                print(f"   ✅ Конвертировано в PDF, запускаю OCR...")
-
-                # Чтение PDF с OCR (используем нашу же функцию!)
-                text = read_pdf(
-                    temp_pdf,
-                    use_ocr=True,
-                    ocr_lang=ocr_lang,
-                    gpu=gpu,
-                    dpi_scale=dpi_scale,
-                    min_text_ratio=min_text_ratio,
-                    ocr_page_limit=ocr_page_limit
-                )
-
-                # Удаляем временный файл
-                os.unlink(temp_pdf)
-
-                if text and len(text.strip()) > 100:
-                    print(f"   ✅ OCR завершён: {len(text)} символов")
+            if res.returncode == 0:
+                text = res.stdout.strip()
+                text = re.sub(r'\[\d+\]|<<\d+>>', '', text)
+                text = re.sub(r'\n{3,}', '\n\n', text)
+                useful_chars = len(re.findall(r'[А-Яа-яЁёA-Za-z0-9\s\.\,\!\?\;\:\-\(\)]', text))
+                words = [w for w in text.split() if len(w) >= 3]
+                if len(text) > 800 and useful_chars / max(len(text), 1) > 0.12 and len(words) > 50:
+                    print(f"   ✓ Текстовый слой извлечён ({len(text):,} символов)")
                     return text
-
-        except subprocess.CalledProcessError as e:
-            print(f"   ⚠️ Ошибка конвертации djvupdf: {e}")
-            if e.stderr:
-                print(f"      stderr: {e.stderr[:200]}")
-        except subprocess.TimeoutExpired:
-            print(f"   ⚠️ Конвертация таймаут (>300 сек)")
+                else:
+                    print("   Текстовый слой слишком короткий / пустой")
         except Exception as e:
-            print(f"   ⚠️ Ошибка: {type(e).__name__}: {e}")
+            print(f"   djvutxt ошибка: {type(e).__name__}")
+
+    if not use_ocr:
+        print("   OCR отключён → возврат пустой строки")
+        return ""
+
+    # ──────────────────────────────────────────
+    # Шаг 2: Постраничный OCR
+    # ──────────────────────────────────────────
+    print("   → Текстового слоя нет → постраничный OCR...")
+
+    total_pages = get_djvu_page_count(file_path)
+    if not total_pages or total_pages < 1:
+        print("   Не удалось определить количество страниц → выход")
+        return ""
+
+    print(f"   Страниц в файле: {total_pages}")
+
+    pages_text = []
+    ocr_count = 0
+
+    for page_idx in range(total_pages):
+        if ocr_page_limit is not None and ocr_count >= ocr_page_limit:
+            print(f"   Достигнут лимит OCR ({ocr_page_limit} страниц)")
+            break
+
+        print(f"   Стр. {page_idx+1}/{total_pages}: обработка...", end="\r")
+
+        img_path = extract_djvu_page_image(file_path, page_idx, dpi=240, format="png")
+        if not img_path:
+            print(f"   Страница {page_idx+1} не извлечена → пропуск")
+            continue
+
+        try:
+            img = Image.open(img_path).convert("RGB")
+            img_array = np.array(img)
+
+            reader = get_easyocr_reader(lang=ocr_lang, gpu=gpu)
+            results = reader.readtext(img_array, detail=1, paragraph=False)
+
+            page_text_parts = [res[1] for res in results if res[2] > 0.28]
+            page_text = "\n".join(page_text_parts).strip()
+
+            if page_text:
+                pages_text.append(f"--- Страница {page_idx+1} ---\n{page_text}")
+                ocr_count += 1
+                print(f"   ✓ OCR OK ({len(page_text):,} символов)")
+            else:
+                print("   OCR вернул пустой текст")
+
+        except Exception as e:
+            print(f"   Ошибка OCR страницы {page_idx+1}: {type(e).__name__}")
         finally:
-            # Гарантированная очистка временного файла
-            if os.path.exists(temp_pdf):
+            if os.path.exists(img_path):
                 try:
-                    os.unlink(temp_pdf)
+                    os.unlink(img_path)
                 except:
                     pass
 
-    elif not djvupdf_path:
-        print(f"   ⚠️ djvupdf не найден — не могу конвертировать в PDF")
+    if pages_text:
+        full_text = "\n\n".join(pages_text)
+        print(f"\n   ✓ Готово! OCR обработано {ocr_count} из {total_pages} страниц")
+        return full_text
 
-    # ==========================================
-    # FALLBACK: Информативное сообщение
-    # ==========================================
-
-    print(f"\n   ⚠️ Не удалось извлечь текст из DJVU")
-    print(f"   📁 Файл: {os.path.basename(file_path)}")
-    print(f"   🔧 Проверьте:")
-    print(f"      • DjVuLibre установлен: https://sourceforge.net/projects/djvu/")
-    print(f"      • Пути в PATH: djvutxt --version, djvupdf --version")
-    print(f"      • Файл не повреждён")
-
+    print("\n   Не удалось извлечь ни одной страницы с текстом")
     return ""
-
 
 # ==========================
 # OCR ФУНКЦИИ (EasyOCR)

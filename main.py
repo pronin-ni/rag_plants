@@ -164,7 +164,7 @@ species_final = [
     if count >= MIN_SPECIES_OCC
 ]
 
-with open("model/species_list.json", "w", encoding="utf-8") as f:
+with open("species_list.json", "w", encoding="utf-8") as f:
     json.dump(species_final, f, ensure_ascii=False, indent=2)
 
 print(f"🌱 Сохранено видов (≥{MIN_SPECIES_OCC} вхождений): {len(species_final)}")
@@ -202,17 +202,17 @@ else:
     print(f"✅ Индекс: IndexIVFFlat (nlist={nlist})")
 
 index.add(embeddings)
-faiss.write_index(index, "model/plants.index")
+faiss.write_index(index, "plants.index")
 print("💾 Индекс сохранён: plants.index")
 
 # ==========================
 # СОХРАНЕНИЕ ДАННЫХ
 # ==========================
 
-with open("model/chunks.json", "w", encoding="utf-8") as f:
+with open("chunks.json", "w", encoding="utf-8") as f:
     json.dump(all_chunks, f, ensure_ascii=False, indent=2)
 
-with open("model/metadata.json", "w", encoding="utf-8") as f:
+with open("metadata.json", "w", encoding="utf-8") as f:
     json.dump(metadata, f, ensure_ascii=False, indent=2)
 
 print("💾 Данные сохранены: chunks.json, metadata.json")

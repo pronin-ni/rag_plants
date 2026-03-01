@@ -67,9 +67,8 @@ for tool, desc in tools.items():
 
     print()
 
-def cal
-# Итог
-print("=" * 60)
+def cal():
+    print("=" * 60)
 if results.get("djvutxt"):
     print("✅ djvutxt работает — текстовый слой будет извлечён!")
 else:
